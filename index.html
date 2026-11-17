@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GIF and Palette Limits Before an Upscale: 256 Colours, Measured at 1× to 8×</title>
+<meta name="description" content="A GIF can hold 256 colours. Upscaling does not add any — it spreads them into bands. Measured with ffmpeg palettegen/paletteuse from 1x to 8x: band width grows 1.58 to 6.34 px entirely from detail the upscale invented, dither costs 1.22× the file at 1× and 2.78× at 8×, and quantising before the upscale is 3.43× larger for 1.77 dB it should not have earned.">
+<link rel="canonical" href="https://celticgemini001.github.io/upgolab-gif-palette-upscaling/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="GIF and Palette Limits Before an Upscale: 256 Colours, Measured at 1× to 8×">
+<meta property="og:description" content="Upscaling a 256-colour image does not add colours, it stretches each band and adds interpolated values nothing can display. Measured: a 6-colour sprite gains 3,020 colours at 8x lanczos, only 29% of output pixels land on the original palette, and the file is 1.7x larger than lossless WebP.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Article",
+ "headline":"GIF and Palette Limits Before an Upscale: 256 Colours, Measured at 1× to 8×",
+ "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "datePublished":"2026-11-17",
+ "dateModified":"2026-11-17",
+ "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-gif-palette-upscaling/"}
+</script>
+<style>
+:root{--ink:#16181d;--mut:#5b6270;--line:#e2e5ea;--acc:#0a58ca}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+h1{font-size:2rem;line-height:1.22;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.33rem;margin:2.5rem 0 .7rem}
+h3{font-size:1.08rem;margin:1.8rem 0 .5rem}
+p,li{color:#2b3038}ul,ol{padding-left:1.3rem}li{margin:.4rem 0}
+a{color:var(--acc)}
+.lede{font-size:1.14rem;color:var(--mut);margin:0 0 1.6rem}
+.meta{font-size:.88rem;color:var(--mut);border-bottom:1px solid var(--line);padding-bottom:1rem;margin-bottom:2rem}
+table{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.94rem}
+th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line)}
+th{font-weight:600;background:#f6f7f9;font-size:.86rem;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.best td{background:#f2f8f2}
+callout{display:block}
+.callout{border-left:3px solid var(--acc);background:#f5f8fd;padding:.9rem 1.1rem;margin:1.6rem 0;border-radius:0 6px 6px 0}
+.callout p{margin:.3rem 0}
+pre{background:#f7f8fa;border:1px solid var(--line);border-radius:8px;padding:1rem;overflow-x:auto;font-size:.86rem}
+code{background:#f0f2f5;padding:.1rem .3rem;border-radius:3px;font-size:.9em}
+pre code{background:none;padding:0}
+footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);font-size:.9rem;color:var(--mut)}
+.scroll{overflow-x:auto}
+.sisternav{margin:2rem 0 0;padding-top:1.2rem;border-top:1px solid #e2e5ea}
+.sisternav p{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;
+ color:#5b6270;margin:0 0 .6rem}
+.sisternav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem}
+.sisternav li{margin:0;font-size:.88rem;line-height:1.4}
+.sisternav a{text-decoration:none;border-bottom:1px solid #d5dae2}
+.sisternav a:hover{border-bottom-color:#0a58ca}
+</style>
+</head>
+<body>
+<main>
+<article>
+<h1>GIF and Palette Limits Before an Upscale: 256 Colours, Measured at 1× to 8×</h1>
+<p class="lede">You have a 256-colour image, you upscale it 4×, and the result is worse than the
+original looked. The instinct is that the upscaler is at fault. It is not. The upscaler did exactly
+what you asked and produced a correct 24-bit image — which your format then threw away, because the
+format still only allows 256 colours and now there are four times as many pixels competing for them.</p>
+<p class="meta">Measured 17 November 2026 · ffmpeg palettegen/paletteuse, PIL 12.2.0, numpy 1.26 ·
+all numbers below reproduced from generated test images, scripts included</p>
+
+<p>This is the fourth post in a series about things that go wrong <em>before</em> the model sees the
+pixels. The earlier ones covered <a href="https://celticgemini001.github.io/upgolab-chroma-subsampling/">chroma
+subsampling</a>, <a href="https://celticgemini001.github.io/upgolab-bit-depth-banding/">bit depth and
+banding</a> and <a href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">colour
+matrix and range</a>. This one covers the case where the bottleneck is not a rounding error or a
+metadata flag but a hard ceiling of 256 entries.</p>
+
+<h2>1. The mechanism, stated precisely</h2>
+
+<p>A palette image stores two things: a table of at most 256 RGB triples, and one index per pixel.
+GIF allows one table per frame, HTML/CSS-rendered PNG-8 allows one table per image, and animated GIF
+usually allocates a fresh 256-entry table for each frame. There is no way to store 257 distinct
+colours. That is the whole constraint.</p>
+
+<p>An upscaler, in contrast, is a continuous-domain operation. Bilinear, bicubic and Lanczos all
+compute weighted averages of neighbouring pixels. Averaging two palette entries that differ produces
+a value that is in neither of them. So the moment you resample a palette image in truecolour — which
+is what every tool does internally — you leave the 256-entry world and enter a 16-million-entry one.
+The question is only what you do on the way back out.</p>
+
+<callout class="callout"><p><strong>The asymmetry that matters.</strong> Downscaling a palette image
+also averages, but it averages towards values that are <em>already present</em> in dense regions, so
+the output tends to stay near the table. Upscaling does the opposite: it manufactures intermediate
+values in the gaps between entries, and the gaps are exactly where the eye looks, because that is
+where the edges are.</p></callout>
+
+<h2>2. How many colours does an upscale actually invent?</h2>
+
+<p>Take three images, quantise each to a palette, then resample in truecolour and count distinct
+output colours. If the "upscaling doesn't add information" intuition were the whole story, the count
+should stay flat. It does not.</p>
+
+<div class="scroll">
+<table>
+<caption style="text-align:left;font-size:.86rem;color:#5b6270;padding-bottom:.5rem">
+Distinct RGB values after resampling a palette-quantised image. 192×192 sources,
+4× = 768×768. Lanczos is the default in most non-AI upscalers.</caption>
+<thead><tr><th>Source</th><th>Base colours</th><th>Factor</th><th class="num">nearest</th><th class="num">bilinear</th><th class="num">lanczos</th></tr></thead>
+<tbody>
+<tr><td>flat graphic<br>(5 colours, hard edges)</td><td class="num">5</td><td class="num">2×</td><td class="num">5</td><td class="num">27</td><td class="num">199</td></tr>
+<tr><td></td><td></td><td class="num">3×</td><td class="num">5</td><td class="num">27</td><td class="num">216</td></tr>
+<tr><td></td><td></td><td class="num">4×</td><td class="num">5</td><td class="num">73</td><td class="num">458</td></tr>
+<tr class="best"><td></td><td></td><td class="num">8×</td><td class="num">5</td><td class="num">215</td><td class="num">1,035</td></tr>
+<tr><td>anime-style cell<br>(30 colours, 1px outlines)</td><td class="num">30</td><td class="num">2×</td><td class="num">30</td><td class="num">210</td><td class="num">1,499</td></tr>
+<tr><td></td><td></td><td class="num">3×</td><td class="num">30</td><td class="num">231</td><td class="num">1,883</td></tr>
+<tr><td></td><td></td><td class="num">4×</td><td class="num">30</td><td class="num">498</td><td class="num">3,570</td></tr>
+<tr class="best"><td></td><td></td><td class="num">8×</td><td class="num">30</td><td class="num">1,204</td><td class="num">7,673</td></tr>
+<tr><td>photo-like<br>(256 colours, smooth gradient)</td><td class="num">256</td><td class="num">2×</td><td class="num">256</td><td class="num">14,285</td><td class="num">25,889</td></tr>
+<tr><td></td><td></td><td class="num">4×</td><td class="num">256</td><td class="num">26,862</td><td class="num">46,456</td></tr>
+<tr><td></td><td></td><td class="num">8×</td><td class="num">256</td><td class="num">40,849</td><td class="num">67,330</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Nearest-neighbour is the only resampler that returns the palette unchanged, and that is a
+tautology — it copies integers, so it cannot create a value. Every interpolating kernel multiplies
+the colour count by 40 to 250 even on flat artwork. A 30-colour cell animation upscaled 8× with
+Lanczos holds 7,673 distinct values. You can display 256 of them.</p>
+
+<p>The flat-graphic row is the most instructive: five source colours, 458 distinct values at 4×. All
+453 extra values sit on the boundaries between the five regions. There is no true detail there at
+all; that is pure kernel ringing on a step edge. It is information in the Shannon sense — the output
+is not predictable from the input without knowing the kernel — but it is not information about the
+scene.</p>
+
+<h2>3. The test that decides everything: does the palette survive the round trip?</h2>
+
+<p>Colour count tells you how much the kernel invented. It does not tell you whether those invented
+values are recoverable. Take a 6-colour sprite — the archetypal case, pixel art from a 40×40 source
+— upscale it, and measure what fraction of output pixels land exactly on one of the six original
+palette entries.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Kernel (8×)</th><th class="num">Colours introduced</th><th class="num">% pixels on original 6</th><th class="num">PSNR vs nearest 8×</th></tr></thead>
+<tbody>
+<tr class="best"><td>nearest</td><td class="num">6</td><td class="num">100.00%</td><td class="num">∞</td></tr>
+<tr><td>bilinear</td><td class="num">382</td><td class="num">81.31%</td><td class="num">20.85 dB</td></tr>
+<tr><td>bicubic</td><td class="num">1,417</td><td class="num">52.88%</td><td class="num">21.35 dB</td></tr>
+<tr><td>lanczos</td><td class="num">3,020</td><td class="num">29.04%</td><td class="num">20.90 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Lanczos leaves <strong>71% of the output</strong> on colours the sprite never contained. Bilinear
+is the mildest at 19%, which is a genuinely useful and slightly surprising result — for pixel art
+specifically, the "worst" kernel by reputation is the best-behaved by this metric, because it only
+ever averages two neighbours and so cannot overshoot into the empty space beyond a colour.</p>
+
+<p>Note the PSNR column: bicubic scores <em>higher</em> than lanczos while keeping fewer exact
+palette pixels. If you are choosing a kernel for pixel art by PSNR against a nearest-neighbour
+reference, you will pick the one that smears most. This is the same failure mode the
+<a href="https://celticgemini001.github.io/upgolab-ai-upscaler-guide/">kernel-selection guide</a>
+measured on a Siemens star: PSNR rewards smoothness, and smoothness is the opposite of a hard edge.</p>
+
+<h2>4. Band width is the number that actually predicts what people complain about</h2>
+
+<p>Nobody complains about "colour count". They complain about <em>stepping</em> — wide flat terraces
+in what should be a smooth gradient. That is measurable directly: walk the centre row of the output,
+count how many consecutive pixels share a value, and take the mean run length. A perfect gradient has
+a run length of 1. A terraced image has long runs.</p>
+
+<div class="scroll">
+<table>
+<caption style="text-align:left;font-size:.86rem;color:#5b6270;padding-bottom:.5rem">
+240×240 photo-like source (smooth sky + soft disc + 1.2σ noise), Lanczos upscale, then
+ffmpeg <code>palettegen=max_colors=256:stats_mode=full</code> + <code>paletteuse</code>.
+band_src is the truecolour run length before quantising — the floor you cannot beat.</caption>
+<thead><tr><th>Factor</th><th class="num">Pixel count</th><th class="num">band_src</th><th class="num">band, dither</th><th class="num">band, no dither</th><th class="num">ratio</th></tr></thead>
+<tbody>
+<tr><td>1×</td><td class="num">240×240</td><td class="num">1.58</td><td class="num">2.05</td><td class="num">3.20</td><td class="num">1.56×</td></tr>
+<tr><td>2×</td><td class="num">480×480</td><td class="num">2.31</td><td class="num">2.31</td><td class="num">7.62</td><td class="num">3.30×</td></tr>
+<tr class="best"><td>4×</td><td class="num">960×960</td><td class="num">3.56</td><td class="num">2.19</td><td class="num">16.27</td><td class="num">7.43×</td></tr>
+<tr><td>8×</td><td class="num">1920×1920</td><td class="num">6.34</td><td class="num">2.23</td><td class="num">24.94</td><td class="num">11.18×</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Without dither, band width tracks the scale factor almost exactly: 3.20 → 7.62 → 16.27 → 24.94.
+That is the terraces growing in proportion to the pixels you added, which is what the mechanism
+predicts. At 8× a single band is 25 pixels wide; at typical viewing size that is a visible stripe on
+a face or a sky.</p>
+
+<p>With dither, band width stays flat at 2.0–2.3 regardless of scale. Dither breaks up the terraces
+by alternating between adjacent palette entries on a fixed pattern, so the run length never grows.
+It looks noisier but it never steps. This is the reason dither exists and the reason the ffmpeg
+default is <code>sierra2_4a</code> rather than <code>none</code>.</p>
+
+<h3>The cost of that flatness</h3>
+
+<p>Dither is not free, and the cost scales worse than the benefit. Same source, same 256-colour
+palette, only the <code>dither=</code> flag differs:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Factor</th><th class="num">dither bytes</th><th class="num">no-dither bytes</th><th class="num">dither overhead</th><th class="num">PSNR dither</th><th class="num">PSNR none</th></tr></thead>
+<tbody>
+<tr><td>1×</td><td class="num">29,345</td><td class="num">24,088</td><td class="num">1.22×</td><td class="num">39.44 dB</td><td class="num">40.71 dB</td></tr>
+<tr><td>2×</td><td class="num">85,834</td><td class="num">57,413</td><td class="num">1.50×</td><td class="num">39.21 dB</td><td class="num">40.83 dB</td></tr>
+<tr><td>4×</td><td class="num">273,293</td><td class="num">140,789</td><td class="num">1.94×</td><td class="num">38.87 dB</td><td class="num">40.81 dB</td></tr>
+<tr class="best"><td>8×</td><td class="num">976,018</td><td class="num">351,625</td><td class="num">2.78×</td><td class="num">38.68 dB</td><td class="num">40.84 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Dither <strong>lowers</strong> PSNR at every scale — by 0.93 dB at 8× — because PSNR measures
+per-pixel error and dither deliberately introduces per-pixel error. If you accept the dither, you
+have to accept that your objective metric gets worse while the picture gets better. Every third-party
+comparison table you have read that ranks GIF encoders by PSNR is measuring the wrong thing for
+exactly this reason.</p>
+
+<h2>5. The counter-intuitive result: quantise first and the picture is <em>sharper</em></h2>
+
+<p>The "obvious" pipeline is: upscale in truecolour, then compress to the delivery format. The
+"wrong" pipeline is: compress first, then upscale. Everyone assumes the second one loses quality
+because you throw away information before you need it. Measured against a truecolour 4× reference,
+it loses on one axis and wins on the other.</p>
+
+<div class="scroll">
+<table>
+<caption style="text-align:left;font-size:.86rem;color:#5b6270;padding-bottom:.5rem">
+240×240 source, 4× target 960×960. Reference = Lanczos 4× in truecolour (999,916-byte PNG).
+Acutance = mean absolute first difference, higher is sharper.</caption>
+<thead><tr><th>Pipeline</th><th class="num">PSNR vs ref</th><th class="num">Acutance</th><th class="num">Bytes</th><th class="num">Distinct colours</th></tr></thead>
+<tbody>
+<tr><td>reference (truecolour 4×)</td><td class="num">—</td><td class="num">0.322</td><td class="num">999,916</td><td class="num">—</td></tr>
+<tr class="best"><td>upscale → GIF <small>(correct order)</small></td><td class="num">38.87 dB</td><td class="num">1.678</td><td class="num">273,293</td><td class="num">255</td></tr>
+<tr><td>GIF → upscale <small>(quantise first)</small></td><td class="num">40.64 dB</td><td class="num">0.549</td><td class="num">937,227</td><td class="num">30,629</td></tr>
+<tr><td>GIF → upscale → GIF</td><td class="num">38.78 dB</td><td class="num">0.686</td><td class="num">225,222</td><td class="num">254</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Quantise-first scores <strong>+1.77 dB</strong> — it is closer to the reference — and yet its
+acutance is <strong>0.549 against 1.678</strong>, roughly a third as sharp. Both numbers are correct.
+Quantising first destroys the fine gradient detail, and a smooth image is easy to predict, so PSNR
+likes it. The upscale-then-quantise path keeps dither structure that PSNR counts as error but that a
+human reads as texture.</p>
+
+<callout class="callout"><p><strong>Record the negative result.</strong> This is the same pattern as
+the temporal page: per-frame reference-comparison metrics favour the pipeline that has already
+destroyed the detail being measured. If you tune a GIF pipeline against PSNR you will land on
+quantise-first, and you will ship a soft, banded result that scores well. The metric and the goal
+point in opposite directions.</p></callout>
+
+<p>The third row is the important one operationally: if you requantise at the end — which any GIF
+output does — the higher PSNR of quantise-first is <em>gone</em> (38.78 vs 38.87, a 0.09 dB
+difference, noise) but you keep the softer edge. You paid the loss and kept none of the score.</p>
+
+<h2>6. Animated GIF: 256 colours per frame, and the tables drift</h2>
+
+<p>An animated GIF is a stack of palette images. If each frame gets its own adaptive palette — which
+is what both PIL and ffmpeg do by default — the palette changes as the content changes. Static
+regions can therefore shift colour frame to frame even though nothing in the scene moved, because
+the table re-centres itself on the new content. That is flicker without motion.</p>
+
+<p>A 24-frame 128×128 animation (smooth sky, one moving disc) written with a per-frame palette:</p>
+
+<table>
+<thead><tr><th>Measure</th><th class="num">Value</th></tr></thead>
+<tbody>
+<tr><td>frames / file size</td><td class="num">24 / 124,569 B</td></tr>
+<tr><td>colours per frame (min / max)</td><td class="num">254 / 256</td></tr>
+<tr><td>distinct colours across whole animation</td><td class="num">1,794</td></tr>
+<tr><td>distinct colours in the truecolour source</td><td class="num">13,746</td></tr>
+<tr><td>mean |frame delta| truecolour source</td><td class="num">1.489</td></tr>
+<tr><td>mean |frame delta| decoded GIF</td><td class="num">1.988</td></tr>
+<tr><td>temporal noise added by quantising</td><td class="num">+33.5%</td></tr>
+<tr><td>colours needed by frame 0 upscaled 4×</td><td class="num">9,328</td></tr>
+</tbody>
+</table>
+
+<p>The GIF's frame-to-frame difference is a third larger than the source's own motion. Some of that
+is quantisation noise appearing and disappearing between frames, which the eye sees as grain crawling
+over still areas. The last row is the punchline: a single frame of this animation needs 9,328 colours
+after a 4× upscale. The format offers 256.</p>
+
+<p>With ffmpeg the fix is <code>stats_mode=diff</code> plus <code>diff_mode=rectangle</code>, which
+weights the palette towards the pixels that actually change and only re-encodes changed rectangles.
+On a 20-frame 160×160 test at 4× that combination holds the GIF at 265,458 B with dither and 130,935 B
+without — a 2.03× swing that is entirely the <code>dither=</code> flag, with the same 102-colour union
+either way. Turning dither off is always the cheapest lever and it is always the wrong one: it trades
+band width for bytes at exactly the ratio table 4 shows.</p>
+
+<h2>7. Where GIF is simply the wrong format</h2>
+
+<p>Measured on the same content, same frame count:</p>
+
+<div class="scroll">
+<table>
+<caption style="text-align:left;font-size:.86rem;color:#5b6270;padding-bottom:.5rem">
+20 frames, sierra2_4a dither for GIF, libwebp_anim for WebP.</caption>
+<thead><tr><th>Format</th><th class="num">1× (160×160)</th><th class="num">4× (640×640)</th><th class="num">vs GIF at 4×</th></tr></thead>
+<tbody>
+<tr><td>GIF, dither on</td><td class="num">26,529 B</td><td class="num">265,458 B</td><td class="num">—</td></tr>
+<tr><td>GIF, dither off</td><td class="num">17,677 B</td><td class="num">130,935 B</td><td class="num">0.49×</td></tr>
+<tr class="best"><td>animated WebP q75</td><td class="num">6,362 B</td><td class="num">19,062 B</td><td class="num">0.07×</td></tr>
+<tr><td>animated WebP lossless</td><td class="num">20,286 B</td><td class="num">171,304 B</td><td class="num">0.65×</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Lossy animated WebP at 4× is <strong>13.9× smaller</strong> than the dithered GIF and has no
+palette ceiling at all. Even lossless WebP beats dithered GIF by 1.55×. The gap widens with scale
+because GIF's LZW compresses runs of identical indices and dither is specifically designed to
+eliminate those runs — the format's compression and its only banding remedy are in direct
+opposition.</p>
+
+<p>Static images show the same thing. A 768×768 Lanczos upscale of a photo-like source:</p>
+
+<table>
+<thead><tr><th>Format</th><th class="num">Bytes</th><th class="num">bpp</th><th class="num">Palette ceiling</th></tr></thead>
+<tbody>
+<tr><td>PNG (truecolour)</td><td class="num">394,892</td><td class="num">5.36</td><td class="num">none</td></tr>
+<tr class="best"><td>WebP q90</td><td class="num">24,764</td><td class="num">0.34</td><td class="num">none</td></tr>
+<tr><td>JPEG q90</td><td class="num">49,099</td><td class="num">0.67</td><td class="num">none</td></tr>
+<tr><td>GIF</td><td class="num">183,443</td><td class="num">2.49</td><td class="num">256</td></tr>
+</tbody>
+</table>
+
+<p>GIF is 7.4× larger than WebP q90 for strictly less colour. On the flat-graphic test — the content
+GIF was designed for — it is 7.1× larger than WebP and still 1.86× larger than PNG, because the
+interpolated edge colours defeat LZW. The only remaining argument for GIF is support, and animated
+WebP has been supported in every current browser since 2020.</p>
+
+<h2>8. A silent no-op that will waste an afternoon</h2>
+
+<p>While building these tests I hit a real one, and it is worth recording because it produces no
+error at all.</p>
+
+<pre><code># PIL 12.2.0 — this does nothing
+im.quantize(colors=16, method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.FLOYDSTEINBERG)
+im.quantize(colors=16, method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.NONE)
+# → byte-identical images. ImageChops.difference().getbbox() is None.
+
+# also identical through the palette path:
+im.convert('P', palette=Image.Palette.ADAPTIVE, colors=16,
+           dither=Image.Dither.FLOYDSTEINBERG)
+
+# 1-bit conversion DOES honour the flag:
+im.convert('1', dither=Image.Dither.FLOYDSTEINBERG)   # != dither=NONE
+</code></pre>
+
+<p>The <code>dither</code> keyword is accepted, silently ignored, and the call returns <code>P</code>
+mode with no warning. It is honoured for 1-bit conversion and dropped for palette quantisation. Two
+of my first-pass experiments reported identical dither and no-dither figures across three content
+types and four scale factors before the duplication made me check — which is the general lesson: if
+two settings produce identical numbers everywhere, suspect the setting, not the content.</p>
+
+<p>The reliable path is ffmpeg's <code>palettegen</code>/<code>paletteuse</code> pair, which does
+honour <code>dither=</code> and lets you choose the algorithm:</p>
+
+<pre><code># upscale in truecolour, then quantise once, at the delivery size
+ffmpeg -i in.png -vf "scale=iw*4:ih*4:flags=lanczos,\
+split[a][b];\
+[a]palettegen=max_colors=256:stats_mode=full[p];\
+[b][p]paletteuse=dither=sierra2_4a" out.gif
+
+# animation: weight the palette towards changing pixels, re-encode rectangles
+ffmpeg -framerate 25 -i up_%03d.png -vf "\
+split[a][b];\
+[a]palettegen=max_colors=256:stats_mode=diff[p];\
+[b][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle" -loop 0 out.gif
+
+# comparison set
+ffmpeg -i up.png -vf "\
+split[a][b];\
+[a]palettegen=max_colors=256[p];\
+[b][p]paletteuse=dither=none" out_nodither.gif
+
+# dither algorithm costs on this content (4x, 256 colours, 960x960):
+#   none 140,789 B  band 16.27 px  PSNR 40.81
+#   sierra2_4a      273,293 B  band  2.19 px  PSNR 38.87
+#   bayer scale=3   253,367 B  band  1.03 px  PSNR 37.90
+#   bayer scale=5   178,807 B  band  5.55 px  PSNR 40.45
+</code></pre>
+
+<p>The Bayer results are worth one line of interpretation: <code>bayer:bayer_scale=3</code> produced
+the narrowest bands of any setting I tried (1.03 px mean run, against 2.19 for sierra2_4a) at a PSNR
+cost of 0.97 dB, and it was <em>cheaper</em> in bytes (253,367 against 273,293) — the opposite of what
+you would guess. Ordered dither is a regular grid, so it never accumulates into runs, but the grid is
+visible as a crosshatch on flat areas. <code>bayer:bayer_scale=5</code> is a useful middle point:
+178,807 B, band 5.55 px, PSNR 40.45 — 35% of sierra2_4a's size for a band 2.5× wider. Error-diffusion
+hides better on photographs; ordered dither hides better on graphics. Neither is universally right,
+and scale 5 is a cheaper compromise than scale 3 on photo content.</p>
+
+<h2>9. What this means for an upscale specifically</h2>
+
+<p>Four rules, each one directly implied by a table above.</p>
+
+<p><strong>Decide the delivery format before you upscale, not after.</strong> If the answer is GIF,
+the upscale is buying you pixels the format cannot describe. The 8× column in table 4 shows what you
+get: 25-pixel-wide bands and a 2.78× dither surcharge. Upscaling 8× into a GIF is a net loss against
+upscaling 4× and letting the viewer's GPU do the rest.</p>
+
+<p><strong>Never quantise before the upscale unless you also stop caring about edges.</strong> The
++1.77 dB that quantise-first scores is a metric artefact of destroyed detail; acutance drops to a
+third. It also costs <strong>3.43×</strong> the bytes of the correct order because you end up storing
+30,629 colours instead of 255.</p>
+
+<p><strong>For pixel art, nearest is not a compromise — it is the only correct kernel.</strong> 100%
+palette retention against 29% for Lanczos, with no invented values to compress. The
+<a href="https://celticgemini001.github.io/upgolab-upscale-anime-illustration/">line-art guide</a>
+found the same thing from the other direction: hard-edged content fails when you average it.</p>
+
+<p><strong>If any interpolating kernel is involved, dither is mandatory and you should stop reading
+PSNR.</strong> Turn it on, accept the 0.9 dB objective loss, and judge the result by band runs or by
+eye. An undithered 8× GIF is 11× worse on band width than its own truecolour source, and no
+subsequent step repairs that.</p>
+
+<p>The broader pattern across all four posts in this series is the same. The expensive part of an
+upscale is not the model — it is the format contract you signed before the model ran. A 256-colour
+ceiling, a 4:2:0 subsample, an 8-bit container, a mislabelled matrix: each one caps what the
+upscaler can ever deliver, and each one is invisible in the output until you measure. Getting the
+<a href="https://upgolab.com">delivery format and colour pipeline right before you upscale</a> costs
+one flag and saves the entire run.</p>
+
+<h2>Reproducing this</h2>
+
+<p>Every number above comes from generated images, no external assets. The whole set runs in under
+two minutes.</p>
+
+<pre><code>import numpy as np
+from PIL import Image
+
+# colour-count growth (table 2)
+n = 192
+sp = np.zeros((40,40,3), np.uint8)          # 6-colour sprite
+PAL = [(20,20,24),(240,240,235),(200,55,50),(45,110,180),(240,200,60),(90,170,90)]
+sp[:,:] = PAL[1]
+sp[12:20,10:30] = PAL[2]; sp[8:12,18:22] = PAL[3]; sp[28:34,12:28] = PAL[4]
+sprite = Image.fromarray(sp)
+for f in (2,3,4,8):
+    for meth in (Image.NEAREST, Image.BILINEAR, Image.LANCZOS):
+        u = sprite.resize((40*f, 40*f), meth)
+        print(f, meth, len(np.unique(np.asarray(u).reshape(-1,3), axis=0)))
+
+# band width (table 4)
+def band(path):
+    L = np.asarray(Image.open(path).convert('L')); r = L[L.shape[0]//2]
+    runs, c = [], 1
+    for i in range(1, len(r)):
+        if r[i] == r[i-1]: c += 1
+        else: runs.append(c); c = 1
+    runs.append(c); return round(float(np.mean(runs)), 2)
+</code></pre>
+
+<p>Band width is the metric I would keep from this whole exercise. It is one function, it needs no
+reference image, and it moves in the direction a human viewer moves — 3.20 at 1× to 24.94 at 8× is
+the terraces appearing, and 2.05 flat across all four scales is dither doing its job.</p>
+
+</article>
+
+<footer>
+<nav class="sisternav" aria-label="More measured upscaling guides">
+<p>More measured guides</p>
+<ul>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">All guides (index)</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-2k-vs-4k-decision/">2K or 4K</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-ai-upscaler-guide/">AI Upscaling Explained</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-anisotropic-upscale/">Upscaling One Axis</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-bit-depth-banding/">8-bit vs 10-bit</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-chroma-subsampling/">Chroma Subsampling Before You Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">Colour Matrix and Range Before Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-exif-orientation-upscale/">EXIF Orientation and Upscale Order</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-fractional-upscale-factors/">Fractional Upscale Factors</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gamma-vs-linear-light/">Gamma Space vs Linear Light</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gif-palette-upscaling/">GIF and Palette Limits</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-halftone-dots-upscaling/">Halftone Dots Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-hdr-upscaling-bit-depth/">Upscaling HDR Photographs</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-interlaced-video-upscale/">Interlaced Video Before Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-jpeg-blocking-upscale/">JPEG Blocking Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-motion-blur-before-upscale/">Motion Blur Before an Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-noise-and-grain-upscaling/">Noise and Grain Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-old-footage-restoration/">Restoring Old Family Video Without a Workstation</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-output-format-after-upscale/">Output Format After Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-remove-background-and-upscale/">Cutout and Upscale in One Workflow</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-screen-recording-4k/">Turning a 1080p Screen Recording Into a Usable 4K Asset</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">Sharpen Before or After Upscaling? The Order Survives Float, Not a File</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-thumbnail-4k-master/">Making a 4K Thumbnail Master From a 720p Frame</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tiled-upscale-seams/">Tiled Upscaling Seams</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-anime-illustration/">Upscaling Line Art Without Destroying the Lines</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-product-photos/">A Product Shot and a Face Fail in Opposite Directions</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-vs-reshoot/">Re-Shoot or Upscale? The Break-Even Point, Measured in Decibels and Millimetres</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-video-upscaling-limits/">Why Video Upscaling Is Not Image Upscaling, Repeated 300 Times</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-what-nofollow-means/">rel=nofollow vs rel=nofollow,noopener — Measured in a Real Browser</a></li>
+</ul>
+</nav>
+</footer>
+</main>
+</body>
+</html>
