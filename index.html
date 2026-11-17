@@ -422,6 +422,145 @@ upscaler can ever deliver, and each one is invisible in the output until you mea
 <a href="https://upgolab.com">delivery format and colour pipeline right before you upscale</a> costs
 one flag and saves the entire run.</p>
 
+<h2>10. Generation loss: what eight successive upscale/quantise cycles actually do</h2>
+
+<p>Everything above measures <em>one</em> round trip. Real work is not one round trip. A designer
+upscales, saves a GIF, re-opens it next week because the client wants it larger, upscales again,
+saves again. Each of those is a full upscale → quantise → downscale cycle against a 256-colour
+ceiling, and the question worth answering is not "does it lose detail" (obviously it does) but
+<strong>which generation loses it, and does the loss compound or saturate?</strong></p>
+
+<p>The answer decides something practical. If loss compounds linearly, the number of times a file
+has passed through a GIF is the thing to audit. If it front-loads, then one round trip is the only
+one that matters and re-saving is close to free.</p>
+
+<h3>Method</h3>
+
+<p>64×64 sprite, 5 actual colours, hard quadrant edges and two diagonals. One generation is:
+lanczos 2× up, quantise against a palette built once from the first upscale and then held fixed,
+lanczos back to 64×64. Holding the palette fixed matters — rebuild it each generation and you
+measure palette adaptation instead of loss. Eight generations, measured against generation 0.</p>
+
+<pre><code>palette = SRC.resize((128,128), Image.LANCZOS).quantize(colors=256, method=Image.MEDIANCUT)
+
+def cycle(im, palette, dither):
+    big = im.resize((im.width*2, im.height*2), Image.LANCZOS)
+    q = big.quantize(palette=palette, dither=dither).convert("RGB")
+    return q.resize((64,64), Image.LANCZOS)     # one generation
+</code></pre>
+
+<p>Note the <code>palette=</code> argument. That detail is the whole difference between this
+experiment working and producing garbage — see the trap at the end.</p>
+
+<h3>Result: the loss front-loads, hard</h3>
+
+<table>
+<caption>Generation 1 → 8, Floyd–Steinberg dither, PSNR against the original</caption>
+<thead><tr><th>Gen</th><th>PSNR (dB)</th><th>Δ vs prev</th><th>Colours</th><th>On palette</th><th>Band (src px)</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>29.548</td><td>—</td><td>256</td><td>38.26%</td><td>3.839</td></tr>
+<tr><td>2</td><td>27.579</td><td>−1.969</td><td>474</td><td>34.81%</td><td>3.032</td></tr>
+<tr><td>3</td><td>26.685</td><td>−0.894</td><td>762</td><td>30.27%</td><td>2.957</td></tr>
+<tr><td>4</td><td>26.065</td><td>−0.620</td><td>872</td><td>27.83%</td><td>2.872</td></tr>
+<tr><td>5</td><td>25.651</td><td>−0.414</td><td>968</td><td>26.64%</td><td>2.709</td></tr>
+<tr><td>6</td><td>25.363</td><td>−0.288</td><td>1.041</td><td>25.63%</td><td>2.592</td></tr>
+<tr><td>7</td><td>25.141</td><td>−0.222</td><td>1.114</td><td>24.90%</td><td>2.484</td></tr>
+<tr><td>8</td><td>24.930</td><td>−0.211</td><td>1.168</td><td>23.75%</td><td>2.444</td></tr>
+</tbody></table>
+
+<p>From generation 1 to generation 8 the image loses <strong>4.618 dB</strong>, and that total
+decomposes unevenly. The single step gen 1 → gen 2 costs <strong>1.969 dB, or 42.6% of the whole
+loss</strong>. The first two steps together cost 2.863 dB — <strong>62%</strong>. The final step
+costs 0.211 dB, about <strong>4.6%</strong>.</p>
+
+<p>That is a usable rule rather than a curiosity: the first pass through the palette does the damage
+and every later pass converges toward a slow floor of roughly 0.2 dB. If you must re-export an
+upgraded GIF a third or fourth time, the fact that it has been through the format before is not a
+reason to stop — the expensive trip already happened. The corollary matters more: a file that has
+been through <em>one</em> quantisation is not "slightly damaged", it is most of the way to the
+asymptote, and re-doing the upscale from that file will not recover the difference.</p>
+
+<h3>The counter-intuitive part: dither makes PSNR worse and bands better</h3>
+
+<p>At generation 1 the two paths are level (+0.046 dB, inside measurement noise). By generation 8
+dithered output is <strong>0.604 dB worse on PSNR</strong> — and simultaneously has <strong>narrower
+bands</strong> (2.444 vs 2.543 source pixels) and <strong>1.79× more distinct colours</strong>
+(1,168 vs 654).</p>
+
+<table>
+<caption>Gen 8, dither vs no dither, same fixed palette</caption>
+<thead><tr><th>Metric</th><th>Floyd–Steinberg</th><th>None</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td>PSNR</td><td>24.930 dB</td><td><strong>25.534 dB</strong></td><td>undithered "wins" by 0.604 dB</td></tr>
+<tr><td>Distinct colours</td><td>1,168</td><td>654</td><td>dither keeps inventing intermediates</td></tr>
+<tr><td>Band width (src px)</td><td><strong>2.444</strong></td><td>2.543</td><td>dither's bands are narrower</td></tr>
+<tr><td>Total PSNR loss, gen 1→8</td><td>−4.618 dB</td><td><strong>−3.968 dB</strong></td><td>undithered degrades slower</td></tr>
+</tbody></table>
+
+<p>This is the same trap as section 3, one layer down. PSNR rewards output that stays close to the
+average, and dithering deliberately moves pixels away from the local average to break up contour
+bands. So a PSNR-driven choice picks the undithered path and gets wider bands — the exact artefact
+people complain about. The metric and the defect point in opposite directions, consistently, and the
+gap <em>grows</em> with generation count: +0.046 dB at gen 1, −0.279 dB at gen 4, −0.604 dB at gen 8.
+The longer your pipeline, the more wrong PSNR-guided format choices become.</p>
+
+<h3>The growing workflow: detail per source pixel collapses 81%</h3>
+
+<p>The other real pattern is not downscale-then-upscale, it is upscale-again-and-again without ever
+coming back down. Same palette, five generations, 64 → 2048 px. Band width here is normalised to
+<em>source</em> pixels, so it does not simply track the rising resolution:</p>
+
+<table>
+<caption>Repeated upscale, no downscale. Band measured in source pixels.</caption>
+<thead><tr><th>Gen</th><th>Scale</th><th>Pixels</th><th>Colours</th><th>Band (src px)</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>2×</td><td>16,384</td><td>184</td><td>1.605</td></tr>
+<tr><td>2</td><td>4×</td><td>65,536</td><td>207</td><td>1.006</td></tr>
+<tr><td>3</td><td>8×</td><td>262,144</td><td>214</td><td>0.636</td></tr>
+<tr><td>4</td><td>16×</td><td>1,048,576</td><td>214</td><td>0.434</td></tr>
+<tr><td>5</td><td>32×</td><td>4,194,304</td><td>215</td><td>0.307</td></tr>
+</tbody></table>
+
+<p>Between generation 1 and generation 5 the flat-run length per source pixel falls from 1.605 to
+0.307 — <strong>80.9% of the measurable band structure is gone</strong> — while the file has grown
+256× in pixel count. The picture gets bigger and flatter at the same time. Colour count also pins at
+<strong>215 of the 256 available</strong> and stops moving: the format ceiling binds long before the
+resolution does, so every extra generation after the second is pure file size.</p>
+
+<h2>The trap that produced two identical columns of "results"</h2>
+
+<p>The first version of this experiment reported dither and no-dither as byte-identical across eight
+generations. That is not a finding, it is a broken flag — and it is worth writing down because the
+mistake is invisible without an assertion.</p>
+
+<pre><code># SILENTLY IGNORED: quantize() builds the palette AND drops the dither argument
+im.quantize(colors=256, dither=Image.Dither.NONE)
+im.quantize(colors=256, dither=Image.Dither.FLOYDSTEINBERG)
+#   -> np.array_equal(...) is True. 0 differing pixels of 65,536.
+
+# HONOURED: pass a pre-built palette image
+pal = im.resize((w*2,h*2), Image.LANCZOS).quantize(colors=256, method=Image.MEDIANCUT)
+big.quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG)   # differs in 3,204 px
+</code></pre>
+
+<p>Measured on Pillow 12.2.0: with <code>colors=</code>, the dither flag has <strong>zero</strong>
+effect and the call returns P mode with no warning. With <code>palette=</code>, it changes
+<strong>3,204 of 16,384</strong> pixels on a 16-colour gradient. The same silent drop applies to
+<code>convert('P', palette=Image.ADAPTIVE)</code>. Only 1-bit conversion honours the flag on the
+convenience path.</p>
+
+<p>The assertion that catches it costs one line and should be in every palette experiment:</p>
+
+<pre><code>assert not np.array_equal(dithered, undithered), \
+    "dither flag did not reach the quantiser - suspect the call signature"
+</code></pre>
+
+<p>Which generalises past this page: when two settings produce <em>identical</em> numbers everywhere,
+suspect the setting before you believe the content. Section 8 records the same failure one level up,
+at the format level. The useful habit is not remembering this particular Pillow quirk — it is
+refusing to publish a comparison whose two columns you have not proved can differ.</p>
+
+
 <h2>Reproducing this</h2>
 
 <p>Every number above comes from generated images, no external assets. The whole set runs in under
