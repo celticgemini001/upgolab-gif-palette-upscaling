@@ -349,7 +349,10 @@ im.convert('1', dither=Image.Dither.FLOYDSTEINBERG)   # != dither=NONE
 </code></pre>
 
 <p>The <code>dither</code> keyword is accepted, silently ignored, and the call returns <code>P</code>
-mode with no warning. It is honoured for 1-bit conversion and dropped for palette quantisation. Two
+mode with no warning on this path. It <em>is</em> honoured for 1-bit conversion, and — measured in
+section 10 — it is also honoured for palette quantisation when you pass a pre-built palette image
+(<code>im.quantize(palette=pal, dither=...)</code> changes 3,204 of 16,384 pixels). The flag is
+dropped only when <code>quantize()</code> is also the call that <em>builds</em> the palette. Two
 of my first-pass experiments reported identical dither and no-dither figures across three content
 types and four scale factors before the duplication made me check — which is the general lesson: if
 two settings produce identical numbers everywhere, suspect the setting, not the content.</p>
